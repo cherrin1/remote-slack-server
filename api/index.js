@@ -1,36 +1,52 @@
 import { SlackClient } from '../lib/slack-client.js';
+import { UserAuth } from '../lib/auth.js';
 
+/**
+ * Main API handler for Slack MCP Server
+ * Handles user registration, authentication, and MCP protocol
+ */
 export default async function handler(req, res) {
-  // CORS headers
+  // CORS headers for web clients
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
   
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // Get Slack token
-  let token = null;
-  const authHeader = req.headers.authorization;
-  
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.substring(7);
-  } else {
-    token = process.env.SLACK_TOKEN;
-  }
-
-  if (!token) {
-    return res.status(401).json({ 
-      error: 'Missing Slack token. Provide via Authorization header or SLACK_TOKEN env var.' 
-    });
-  }
-
-  const slackClient = new SlackClient(token);
+  const path = req.url || '/';
 
   try {
+    // User registration endpoint
+    if (req.method === 'POST' && path === '/register') {
+      return await handleRegistration(req, res);
+    }
+
+    // User management endpoints
+    if (path.startsWith('/users')) {
+      return await handleUserManagement(req, res);
+    }
+
+    // Admin endpoints
+    if (path.startsWith('/admin')) {
+      return await handleAdminEndpoints(req, res);
+    }
+
+    // MCP endpoints - require authentication
+    const userData = await authenticateRequest(req);
+    if (!userData) {
+      return res.status(401).json({ 
+        error: 'Authentication required',
+        message: 'Include X-API-Key header with your API key',
+        register: 'POST /register with your Slack token to get an API key'
+      });
+    }
+
+    const slackClient = new SlackClient(userData.slackToken);
+
     // Handle MCP protocol
-    if (req.method === 'POST') {
+    if (req.method === 'POST' && (path === '/' || path === '/mcp')) {
       const { method, params } = req.body;
 
       switch (method) {
@@ -40,72 +56,13 @@ export default async function handler(req, res) {
             capabilities: { tools: {} },
             serverInfo: {
               name: 'slack-mcp-server',
-              version: '1.0.0'
+              version: '1.0.0',
+              user: userData.id
             }
           });
 
         case 'tools/list':
-          return res.json({
-            tools: [
-              {
-                name: 'slack_search_messages',
-                description: 'Search for messages across Slack channels',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    query: { type: 'string', description: 'Search query' },
-                    limit: { type: 'number', description: 'Number of results (default: 20)', default: 20 }
-                  },
-                  required: ['query']
-                }
-              },
-              {
-                name: 'slack_get_channels',
-                description: 'List available channels',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    types: { type: 'string', description: 'Channel types (default: public_channel)', default: 'public_channel' },
-                    limit: { type: 'number', description: 'Number of channels (default: 100)', default: 100 }
-                  }
-                }
-              },
-              {
-                name: 'slack_get_channel_history',
-                description: 'Get recent messages from a specific channel',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    channel: { type: 'string', description: 'Channel ID or name' },
-                    limit: { type: 'number', description: 'Number of messages (default: 50)', default: 50 }
-                  },
-                  required: ['channel']
-                }
-              },
-              {
-                name: 'slack_send_message',
-                description: 'Send a message to a channel',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    channel: { type: 'string', description: 'Channel ID or name' },
-                    text: { type: 'string', description: 'Message text' }
-                  },
-                  required: ['channel', 'text']
-                }
-              },
-              {
-                name: 'slack_get_users',
-                description: 'List workspace users',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    limit: { type: 'number', description: 'Number of users (default: 100)', default: 100 }
-                  }
-                }
-              }
-            ]
-          });
+          return res.json({ tools: getAvailableTools() });
 
         case 'tools/call':
           return await handleToolCall(slackClient, params, res);
@@ -118,17 +75,28 @@ export default async function handler(req, res) {
     // Server info endpoint
     if (req.method === 'GET') {
       return res.json({
-        name: 'Slack MCP Server',
-        description: 'MCP server for Slack integration with Claude',
+        name: 'Multi-User Slack MCP Server',
+        description: 'Secure MCP server for Slack integration with user token storage',
         version: '1.0.0',
-        capabilities: ['search', 'channels', 'messages', 'users']
+        user: {
+          id: userData.id,
+          lastUsed: userData.lastUsed,
+          active: userData.active,
+          usage: userData.usage
+        },
+        endpoints: {
+          register: 'POST /register',
+          mcp: 'POST / (with X-API-Key header)',
+          userInfo: 'GET /users/me',
+          docs: 'https://github.com/your-repo/slack-mcp-server'
+        }
       });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('API Error:', error);
     return res.status(500).json({ 
       error: 'Server error',
       message: error.message 
@@ -136,6 +104,283 @@ export default async function handler(req, res) {
   }
 }
 
+/**
+ * Authenticate incoming requests using API key
+ */
+async function authenticateRequest(req) {
+  const apiKey = req.headers['x-api-key'] || 
+                 req.headers['authorization']?.replace('Bearer ', '') ||
+                 req.query.apiKey;
+  
+  if (!apiKey) return null;
+  
+  try {
+    return await UserAuth.getUserByApiKey(apiKey);
+  } catch (error) {
+    console.error('Auth error:', error);
+    return null;
+  }
+}
+
+/**
+ * Handle user registration
+ */
+async function handleRegistration(req, res) {
+  const { slackToken, userInfo = {} } = req.body;
+  
+  if (!slackToken || !slackToken.startsWith('xoxp-')) {
+    return res.status(400).json({ 
+      error: 'Valid Slack user token required',
+      format: 'Token must start with xoxp-',
+      help: 'Get your token from https://api.slack.com/apps'
+    });
+  }
+
+  try {
+    // Validate token by testing it
+    const slackClient = new SlackClient(slackToken);
+    const authTest = await slackClient.testAuth();
+    
+    // Create user
+    const { userId, apiKey } = await UserAuth.createUser(slackToken, {
+      ...userInfo,
+      slackUserId: authTest.user_id,
+      slackTeam: authTest.team_id,
+      slackTeamName: authTest.team,
+      slackUrl: authTest.url
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'User registered successfully',
+      userId,
+      apiKey,
+      slackInfo: {
+        userId: authTest.user_id,
+        team: authTest.team,
+        url: authTest.url
+      },
+      instructions: {
+        usage: 'Include X-API-Key header in all MCP requests',
+        claude: 'Use this API key in Claude MCP settings',
+        example: `curl -H "X-API-Key: ${apiKey}" https://your-server.vercel.app`
+      }
+    });
+
+  } catch (error) {
+    return res.status(400).json({ 
+      error: 'Registration failed',
+      message: error.message,
+      help: 'Check that your Slack token is valid and has required permissions'
+    });
+  }
+}
+
+/**
+ * Handle user management endpoints
+ */
+async function handleUserManagement(req, res) {
+  const userData = await authenticateRequest(req);
+  const path = req.url;
+
+  // Get user info
+  if (req.method === 'GET' && path === '/users/me') {
+    if (!userData) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    return res.json({
+      id: userData.id,
+      createdAt: userData.createdAt,
+      lastUsed: userData.lastUsed,
+      active: userData.active,
+      userInfo: userData.userInfo,
+      usage: userData.usage
+    });
+  }
+
+  // Update Slack token
+  if (req.method === 'PUT' && path === '/users/me/token') {
+    if (!userData) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const { slackToken } = req.body;
+    
+    if (!slackToken || !slackToken.startsWith('xoxp-')) {
+      return res.status(400).json({ 
+        error: 'Valid Slack user token required' 
+      });
+    }
+
+    try {
+      // Validate new token
+      const slackClient = new SlackClient(slackToken);
+      await slackClient.testAuth();
+      
+      // Update stored token
+      await UserAuth.updateUserToken(userData.id, slackToken);
+      
+      return res.json({
+        success: true,
+        message: 'Slack token updated successfully'
+      });
+
+    } catch (error) {
+      return res.status(400).json({ 
+        error: 'Invalid Slack token',
+        message: error.message 
+      });
+    }
+  }
+
+  // Rotate API key
+  if (req.method === 'POST' && path === '/users/me/rotate-key') {
+    if (!userData) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    try {
+      const newApiKey = await UserAuth.rotateApiKey(userData.id);
+      
+      return res.json({
+        success: true,
+        message: 'API key rotated successfully',
+        newApiKey,
+        warning: 'Update your Claude configuration with the new API key'
+      });
+
+    } catch (error) {
+      return res.status(500).json({ 
+        error: 'Failed to rotate API key',
+        message: error.message 
+      });
+    }
+  }
+
+  // Deactivate account
+  if (req.method === 'DELETE' && path === '/users/me') {
+    if (!userData) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    await UserAuth.deactivateUser(userData.id);
+    
+    return res.json({
+      success: true,
+      message: 'Account deactivated successfully'
+    });
+  }
+
+  return res.status(404).json({ error: 'Endpoint not found' });
+}
+
+/**
+ * Handle admin endpoints
+ */
+async function handleAdminEndpoints(req, res) {
+  const adminToken = req.headers['admin-token'] || req.headers['authorization']?.replace('Bearer ', '');
+  
+  if (!adminToken || adminToken !== process.env.ADMIN_TOKEN) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  const path = req.url;
+
+  // List all users
+  if (req.method === 'GET' && path === '/admin/users') {
+    const { limit = 100, cursor = '0' } = req.query;
+    const result = await UserAuth.listUsers(parseInt(limit), cursor);
+    return res.json(result);
+  }
+
+  // Get system stats
+  if (req.method === 'GET' && path === '/admin/stats') {
+    const stats = await UserAuth.getStats();
+    return res.json(stats);
+  }
+
+  // Cleanup inactive users
+  if (req.method === 'POST' && path === '/admin/cleanup') {
+    const { daysInactive = 90 } = req.body;
+    const cleanedUp = await UserAuth.cleanupInactiveUsers(daysInactive);
+    return res.json({
+      success: true,
+      message: `Cleaned up ${cleanedUp} inactive users`
+    });
+  }
+
+  return res.status(404).json({ error: 'Admin endpoint not found' });
+}
+
+/**
+ * Get list of available MCP tools
+ */
+function getAvailableTools() {
+  return [
+    {
+      name: 'slack_search_messages',
+      description: 'Search for messages across Slack channels',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          limit: { type: 'number', description: 'Number of results (default: 20)', default: 20 }
+        },
+        required: ['query']
+      }
+    },
+    {
+      name: 'slack_get_channels',
+      description: 'List available channels',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          types: { type: 'string', description: 'Channel types (default: public_channel)', default: 'public_channel' },
+          limit: { type: 'number', description: 'Number of channels (default: 100)', default: 100 }
+        }
+      }
+    },
+    {
+      name: 'slack_get_channel_history',
+      description: 'Get recent messages from a specific channel',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel: { type: 'string', description: 'Channel ID or name' },
+          limit: { type: 'number', description: 'Number of messages (default: 50)', default: 50 }
+        },
+        required: ['channel']
+      }
+    },
+    {
+      name: 'slack_send_message',
+      description: 'Send a message to a channel',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel: { type: 'string', description: 'Channel ID or name' },
+          text: { type: 'string', description: 'Message text' }
+        },
+        required: ['channel', 'text']
+      }
+    },
+    {
+      name: 'slack_get_users',
+      description: 'List workspace users',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Number of users (default: 100)', default: 100 }
+        }
+      }
+    }
+  ];
+}
+
+/**
+ * Handle MCP tool calls
+ */
 async function handleToolCall(slackClient, params, res) {
   const { name, arguments: args } = params;
 
@@ -143,19 +388,14 @@ async function handleToolCall(slackClient, params, res) {
     switch (name) {
       case 'slack_search_messages':
         return await searchMessages(slackClient, args, res);
-      
       case 'slack_get_channels':
         return await getChannels(slackClient, args, res);
-      
       case 'slack_get_channel_history':
         return await getChannelHistory(slackClient, args, res);
-      
       case 'slack_send_message':
         return await sendMessage(slackClient, args, res);
-      
       case 'slack_get_users':
         return await getUsers(slackClient, args, res);
-      
       default:
         return res.status(400).json({ error: `Unknown tool: ${name}` });
     }
@@ -170,16 +410,12 @@ async function handleToolCall(slackClient, params, res) {
   }
 }
 
+// Tool implementations
 async function searchMessages(slackClient, args, res) {
   const { query, limit = 20 } = args;
 
   try {
-    // Try search.messages API first
-    const searchData = await slackClient.makeRequest('search.messages', {
-      query,
-      count: limit
-    });
-
+    const searchData = await slackClient.searchMessages(query, limit);
     const results = searchData.messages.matches.map(match => ({
       channel: match.channel.name,
       user: match.username,
@@ -200,7 +436,6 @@ async function searchMessages(slackClient, args, res) {
 
   } catch (error) {
     if (error.message.includes('not_allowed_token_type')) {
-      // Fallback to manual search
       return await fallbackSearch(slackClient, query, limit, res);
     }
     throw error;
@@ -208,12 +443,7 @@ async function searchMessages(slackClient, args, res) {
 }
 
 async function fallbackSearch(slackClient, query, limit, res) {
-  // Get channels and search manually
-  const channelsData = await slackClient.makeRequest('conversations.list', {
-    types: 'public_channel,private_channel',
-    limit: 50
-  });
-
+  const channelsData = await slackClient.getChannels('public_channel,private_channel', 50);
   const searchTerms = query.toLowerCase().split(/\s+/).filter(term => term.length > 2);
   let allResults = [];
 
@@ -221,11 +451,7 @@ async function fallbackSearch(slackClient, query, limit, res) {
     if (!channel.is_member) continue;
     
     try {
-      const history = await slackClient.makeRequest('conversations.history', {
-        channel: channel.id,
-        limit: 50
-      });
-
+      const history = await slackClient.getChannelHistory(channel.id, 50);
       const matchingMessages = history.messages
         .filter(msg => {
           const text = (msg.text || '').toLowerCase();
@@ -238,7 +464,6 @@ async function fallbackSearch(slackClient, query, limit, res) {
         }));
 
       allResults.push(...matchingMessages);
-      
       if (allResults.length >= limit) break;
     } catch (e) {
       continue;
@@ -246,7 +471,6 @@ async function fallbackSearch(slackClient, query, limit, res) {
   }
 
   const results = allResults.slice(0, limit);
-
   return res.json({
     content: [{
       type: 'text',
@@ -260,11 +484,7 @@ async function fallbackSearch(slackClient, query, limit, res) {
 
 async function getChannels(slackClient, args, res) {
   const { types = 'public_channel', limit = 100 } = args;
-
-  const data = await slackClient.makeRequest('conversations.list', {
-    types,
-    limit
-  });
+  const data = await slackClient.getChannels(types, limit);
 
   const channels = data.channels.map(channel => ({
     id: channel.id,
@@ -287,11 +507,7 @@ async function getChannels(slackClient, args, res) {
 
 async function getChannelHistory(slackClient, args, res) {
   const { channel, limit = 50 } = args;
-
-  const data = await slackClient.makeRequest('conversations.history', {
-    channel,
-    limit
-  });
+  const data = await slackClient.getChannelHistory(channel, limit);
 
   const messages = data.messages.map(msg => ({
     user: msg.user,
@@ -312,11 +528,7 @@ async function getChannelHistory(slackClient, args, res) {
 
 async function sendMessage(slackClient, args, res) {
   const { channel, text } = args;
-
-  const data = await slackClient.makeRequest('chat.postMessage', {
-    channel,
-    text
-  }, 'POST');
+  await slackClient.sendMessage(channel, text);
 
   return res.json({
     content: [{
@@ -328,10 +540,7 @@ async function sendMessage(slackClient, args, res) {
 
 async function getUsers(slackClient, args, res) {
   const { limit = 100 } = args;
-
-  const data = await slackClient.makeRequest('users.list', {
-    limit
-  });
+  const data = await slackClient.getUsers(limit);
 
   const users = data.members
     .filter(user => !user.deleted && !user.is_bot)
