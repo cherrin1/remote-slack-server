@@ -1,10 +1,12 @@
+import { kv } from '@vercel/kv';
+
 export default async function handler(req, res) {
-  // Only allow GET requests for the connection page
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   const baseUrl = `https://${req.headers.host}`;
+  const { oauth, auth_code, redirect_uri, state, client_id } = req.query;
 
   const html = `
 <!DOCTYPE html>
@@ -58,6 +60,25 @@ export default async function handler(req, res) {
         .subtitle {
             color: #718096;
             margin-bottom: 30px;
+        }
+
+        .oauth-notice {
+            background: #e6fffa;
+            border: 2px solid #38b2ac;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .oauth-notice h3 {
+            color: #234e52;
+            margin-bottom: 8px;
+        }
+
+        .oauth-notice p {
+            color: #2d3748;
+            font-size: 14px;
         }
         
         .form-group {
@@ -191,62 +212,39 @@ export default async function handler(req, res) {
             color: #2a4365;
         }
         
-        .api-key-result {
-            background: #f7fafc;
+        .oauth-success {
+            background: #f0fff4;
             border: 2px solid #68d391;
             border-radius: 8px;
             padding: 20px;
             margin-top: 20px;
+            text-align: center;
             display: none;
         }
         
-        .api-key-result h3 {
+        .oauth-success h3 {
             color: #22543d;
             margin-bottom: 12px;
         }
         
-        .api-key {
-            background: #1a202c;
-            color: #68d391;
-            padding: 12px;
-            border-radius: 6px;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            word-break: break-all;
-            margin: 12px 0;
+        .oauth-success p {
+            color: #2d3748;
+            margin-bottom: 16px;
         }
         
-        .copy-btn {
+        .complete-btn {
             background: #48bb78;
             color: white;
             border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
+            padding: 12px 24px;
+            border-radius: 8px;
             cursor: pointer;
-            font-size: 14px;
-            margin-top: 8px;
+            font-size: 16px;
+            font-weight: 600;
         }
         
-        .copy-btn:hover {
+        .complete-btn:hover {
             background: #38a169;
-        }
-        
-        .instructions {
-            background: #f7fafc;
-            border-left: 4px solid #667eea;
-            padding: 16px;
-            margin-top: 16px;
-        }
-        
-        .instructions h4 {
-            color: #2d3748;
-            margin-bottom: 8px;
-        }
-        
-        .instructions p {
-            color: #4a5568;
-            font-size: 14px;
-            line-height: 1.5;
         }
     </style>
 </head>
@@ -257,6 +255,13 @@ export default async function handler(req, res) {
             <h1>Connect Slack to Claude</h1>
             <p class="subtitle">Connect your Slack workspace to Claude's MCP server</p>
         </div>
+        
+        ${oauth ? `
+        <div class="oauth-notice">
+            <h3>🔗 Claude OAuth Connection</h3>
+            <p>Complete your Slack connection for Claude by entering your token below.</p>
+        </div>
+        ` : ''}
         
         <form id="connectionForm">
             <div class="workplace-note">
@@ -313,36 +318,34 @@ export default async function handler(req, res) {
             </div>
             
             <button type="submit" class="connect-btn" id="connectBtn">
-                🔗 Connect to Claude
+                🔗 ${oauth ? 'Complete Claude Connection' : 'Connect to Claude'}
             </button>
         </form>
         
         <div class="status" id="status"></div>
         
-        <div class="api-key-result" id="apiKeyResult">
-            <h3>✅ Successfully Connected!</h3>
-            <p>Your API Key:</p>
-            <div class="api-key" id="apiKey"></div>
-            <button class="copy-btn" onclick="copyApiKey()">📋 Copy API Key</button>
-            
-            <div class="instructions">
-                <h4>🤖 Next Steps for Claude:</h4>
-                <p>
-                    Your Slack MCP server is already configured in Claude. 
-                    Your connection will be automatically authenticated using your API key.
-                    You can now ask Claude to search Slack, get channel info, send messages, and more!
-                </p>
-            </div>
+        <div class="oauth-success" id="oauthSuccess">
+            <h3>✅ Connection Complete!</h3>
+            <p>Your Slack workspace has been successfully connected to Claude.</p>
+            <button class="complete-btn" onclick="completeOAuth()">
+                🚀 Return to Claude
+            </button>
         </div>
     </div>
 
     <script>
+        // OAuth parameters from URL
+        const isOAuth = ${oauth ? 'true' : 'false'};
+        const authCode = '${auth_code || ''}';
+        const redirectUri = '${redirect_uri || ''}';
+        const state = '${state || ''}';
+        
         document.getElementById('connectionForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const submitBtn = document.getElementById('connectBtn');
             const status = document.getElementById('status');
-            const apiKeyResult = document.getElementById('apiKeyResult');
+            const oauthSuccess = document.getElementById('oauthSuccess');
             
             // Get form data
             const slackToken = document.getElementById('slackToken').value.trim();
@@ -359,7 +362,6 @@ export default async function handler(req, res) {
             submitBtn.disabled = true;
             submitBtn.textContent = '🔄 Connecting...';
             showStatus('loading', '🔄 Connecting to Slack and registering your token...');
-            apiKeyResult.style.display = 'none';
             
             try {
                 const response = await fetch('${baseUrl}/register', {
@@ -372,7 +374,7 @@ export default async function handler(req, res) {
                         userInfo: {
                             name: userName || 'Anonymous User',
                             email: userEmail || '',
-                            source: 'web-interface',
+                            source: isOAuth ? 'oauth-web-interface' : 'web-interface',
                             timestamp: new Date().toISOString()
                         }
                     })
@@ -381,15 +383,27 @@ export default async function handler(req, res) {
                 const data = await response.json();
                 
                 if (response.ok && data.success) {
-                    // Success!
-                    showStatus('success', '✅ Successfully connected to Slack!');
-                    
-                    // Show API key
-                    document.getElementById('apiKey').textContent = data.apiKey;
-                    apiKeyResult.style.display = 'block';
-                    
-                    // Reset form
-                    document.getElementById('connectionForm').reset();
+                    if (isOAuth && authCode) {
+                        // Store the API key for OAuth flow
+                        await fetch('${baseUrl}/oauth/store-token', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                authCode: authCode,
+                                apiKey: data.apiKey
+                            })
+                        });
+                        
+                        // Show OAuth success
+                        showStatus('success', '✅ Successfully connected to Slack!');
+                        oauthSuccess.style.display = 'block';
+                        document.getElementById('connectionForm').style.display = 'none';
+                    } else {
+                        // Regular success - show API key
+                        showStatus('success', '✅ Successfully connected! API Key: ' + data.apiKey);
+                    }
                     
                 } else {
                     // Error from server
@@ -402,7 +416,7 @@ export default async function handler(req, res) {
             } finally {
                 // Reset button
                 submitBtn.disabled = false;
-                submitBtn.textContent = '🔗 Connect to Claude';
+                submitBtn.textContent = isOAuth ? '🔗 Complete Claude Connection' : '🔗 Connect to Claude';
             }
         });
         
@@ -413,27 +427,15 @@ export default async function handler(req, res) {
             status.style.display = 'block';
         }
         
-        function copyApiKey() {
-            const apiKey = document.getElementById('apiKey').textContent;
-            navigator.clipboard.writeText(apiKey).then(() => {
-                const btn = event.target;
-                const originalText = btn.textContent;
-                btn.textContent = '✅ Copied!';
-                btn.style.background = '#38a169';
-                setTimeout(() => {
-                    btn.textContent = originalText;
-                    btn.style.background = '#48bb78';
-                }, 2000);
-            }).catch(() => {
-                // Fallback for older browsers
-                const textArea = document.createElement('textarea');
-                textArea.value = apiKey;
-                document.body.appendChild(textArea);
-                textArea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textArea);
-                alert('API key copied to clipboard!');
-            });
+        function completeOAuth() {
+            if (redirectUri) {
+                const returnUrl = redirectUri + 
+                    \`?code=\${authCode}\` + 
+                    (state ? \`&state=\${state}\` : '');
+                window.location.href = returnUrl;
+            } else {
+                window.close();
+            }
         }
         
         // Auto-focus token input
