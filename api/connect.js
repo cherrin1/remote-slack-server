@@ -1,5 +1,4 @@
-import { kv } from '@vercel/kv';
-
+// api/connect.js - Updated to not generate API keys
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -210,6 +209,17 @@ export default async function handler(req, res) {
         .complete-btn:hover {
             background: #38a169;
         }
+
+        .token-display {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 16px;
+            font-family: monospace;
+            font-size: 14px;
+            word-break: break-all;
+        }
     </style>
 </head>
 <body>
@@ -274,6 +284,10 @@ export default async function handler(req, res) {
         <div class="claude-success" id="claudeSuccess">
             <h3>✅ Integration Complete!</h3>
             <p>Your Slack workspace has been successfully connected to Claude Web.</p>
+            <div class="token-display" id="tokenDisplay" style="display: none;">
+                <strong>Your Token:</strong><br>
+                <span id="tokenValue"></span>
+            </div>
             <button class="complete-btn" onclick="completeClaudeOAuth()">
                 🚀 Return to Claude
             </button>
@@ -330,7 +344,7 @@ export default async function handler(req, res) {
                 
                 if (response.ok && data.success) {
                     if (isClaudeWeb && authCode) {
-                        // Store API key for Claude Web OAuth flow
+                        // Store token for Claude Web OAuth flow
                         await fetch('${baseUrl}/oauth/store-token', {
                             method: 'POST',
                             headers: {
@@ -338,7 +352,7 @@ export default async function handler(req, res) {
                             },
                             body: JSON.stringify({
                                 authCode: authCode,
-                                apiKey: data.apiKey
+                                token: slackToken
                             })
                         });
                         
@@ -346,7 +360,9 @@ export default async function handler(req, res) {
                         claudeSuccess.style.display = 'block';
                         document.getElementById('connectionForm').style.display = 'none';
                     } else {
-                        showStatus('success', '✅ Successfully connected! API Key: ' + data.apiKey);
+                        showStatus('success', '✅ Successfully connected!');
+                        document.getElementById('tokenValue').textContent = slackToken;
+                        document.getElementById('tokenDisplay').style.display = 'block';
                     }
                 } else {
                     showStatus('error', '❌ ' + (data.message || data.error || 'Connection failed'));
