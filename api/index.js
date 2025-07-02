@@ -1,15 +1,13 @@
+// For Claude Web Integration - Update api/index.js
+
 import { SlackClient } from '../lib/slack-client.js';
 import { UserAuth } from '../lib/auth.js';
 
-/**
- * Main API handler for Slack MCP Server
- * Handles user registration, authentication, and MCP protocol
- */
 export default async function handler(req, res) {
-  // CORS headers for web clients
+  // CORS headers for Claude web
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -18,36 +16,45 @@ export default async function handler(req, res) {
   const path = req.url || '/';
 
   try {
-    // User registration endpoint
+    // Server capabilities endpoint for Claude web
+    if (req.method === 'GET' && path === '/') {
+      return res.json({
+        name: "Slack MCP Server",
+        version: "1.0.0",
+        description: "Connect your Slack workspace to Claude",
+        capabilities: {
+          tools: true
+        },
+        instructions: {
+          setup: "Get your API key by registering at /connect",
+          authentication: "Use your API key in the Authorization header as 'Bearer your-api-key'"
+        },
+        endpoints: {
+          connect: "Visit /connect to register your Slack token and get an API key",
+          register: "POST /register with your Slack token to get an API key"
+        }
+      });
+    }
+
+    // Registration endpoint (for /connect page)
     if (req.method === 'POST' && path === '/register') {
       return await handleRegistration(req, res);
     }
 
-    // User management endpoints
-    if (path.startsWith('/users')) {
-      return await handleUserManagement(req, res);
-    }
-
-    // Admin endpoints
-    if (path.startsWith('/admin')) {
-      return await handleAdminEndpoints(req, res);
-    }
-
-    // MCP endpoints - require authentication
+    // Authentication for MCP calls
     const userData = await authenticateRequest(req);
     if (!userData) {
       return res.status(401).json({ 
         error: 'Authentication required',
-        message: 'Include X-API-Key header with your API key',
-        register: 'POST /register with your Slack token to get an API key'
+        message: 'Get your API key at /connect and use it as: Authorization: Bearer your-api-key'
       });
     }
 
     const slackClient = new SlackClient(userData.slackToken);
 
     // Handle MCP protocol
-    if (req.method === 'POST' && (path === '/' || path === '/mcp')) {
-      const { method, params } = req.body;
+    if (req.method === 'POST') {
+      const { method, params } = req.body || {};
 
       switch (method) {
         case 'initialize':
@@ -72,27 +79,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // Server info endpoint
-    if (req.method === 'GET') {
-      return res.json({
-        name: 'Multi-User Slack MCP Server',
-        description: 'Secure MCP server for Slack integration with user token storage',
-        version: '1.0.0',
-        user: {
-          id: userData.id,
-          lastUsed: userData.lastUsed,
-          active: userData.active,
-          usage: userData.usage
-        },
-        endpoints: {
-          register: 'POST /register',
-          mcp: 'POST / (with X-API-Key header)',
-          userInfo: 'GET /users/me',
-          docs: 'https://github.com/your-repo/slack-mcp-server'
-        }
-      });
-    }
-
     return res.status(405).json({ error: 'Method not allowed' });
 
   } catch (error) {
@@ -104,13 +90,24 @@ export default async function handler(req, res) {
   }
 }
 
-/**
- * Authenticate incoming requests using API key
- */
+// Authentication function
 async function authenticateRequest(req) {
-  const apiKey = req.headers['x-api-key'] || 
-                 req.headers['authorization']?.replace('Bearer ', '') ||
-                 req.query.apiKey;
+  // For Claude web, API key comes in Authorization header
+  const authHeader = req.headers.authorization;
+  let apiKey = null;
+  
+  if (authHeader) {
+    if (authHeader.startsWith('Bearer ')) {
+      apiKey = authHeader.substring(7);
+    } else if (authHeader.startsWith('smcp_')) {
+      apiKey = authHeader;
+    }
+  }
+  
+  // Also check X-API-Key header as fallback
+  if (!apiKey) {
+    apiKey = req.headers['x-api-key'];
+  }
   
   if (!apiKey) return null;
   
@@ -122,22 +119,19 @@ async function authenticateRequest(req) {
   }
 }
 
-/**
- * Handle user registration
- */
+// Registration handler
 async function handleRegistration(req, res) {
   const { slackToken, userInfo = {} } = req.body;
   
   if (!slackToken || !slackToken.startsWith('xoxp-')) {
     return res.status(400).json({ 
       error: 'Valid Slack user token required',
-      format: 'Token must start with xoxp-',
-      help: 'Get your token from https://api.slack.com/apps'
+      format: 'Token must start with xoxp-'
     });
   }
 
   try {
-    // Validate token by testing it
+    // Validate token
     const slackClient = new SlackClient(slackToken);
     const authTest = await slackClient.testAuth();
     
@@ -147,175 +141,31 @@ async function handleRegistration(req, res) {
       slackUserId: authTest.user_id,
       slackTeam: authTest.team_id,
       slackTeamName: authTest.team,
-      slackUrl: authTest.url
+      slackUrl: authTest.url,
+      source: 'claude-web-integration'
     });
 
     return res.status(201).json({
       success: true,
-      message: 'User registered successfully',
-      userId,
+      message: 'Successfully registered for Claude web integration',
       apiKey,
-      slackInfo: {
-        userId: authTest.user_id,
-        team: authTest.team,
-        url: authTest.url
-      },
-      instructions: {
-        usage: 'Include X-API-Key header in all MCP requests',
-        claude: 'Use this API key in Claude MCP settings',
-        example: `curl -H "X-API-Key: ${apiKey}" https://your-server.vercel.app`
+      userId,
+      integration: {
+        server_url: `https://${req.headers.host}`,
+        authorization: `Bearer ${apiKey}`,
+        instructions: "Use this API key in Claude web integration settings"
       }
     });
 
   } catch (error) {
     return res.status(400).json({ 
       error: 'Registration failed',
-      message: error.message,
-      help: 'Check that your Slack token is valid and has required permissions'
+      message: error.message
     });
   }
 }
 
-/**
- * Handle user management endpoints
- */
-async function handleUserManagement(req, res) {
-  const userData = await authenticateRequest(req);
-  const path = req.url;
-
-  // Get user info
-  if (req.method === 'GET' && path === '/users/me') {
-    if (!userData) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    return res.json({
-      id: userData.id,
-      createdAt: userData.createdAt,
-      lastUsed: userData.lastUsed,
-      active: userData.active,
-      userInfo: userData.userInfo,
-      usage: userData.usage
-    });
-  }
-
-  // Update Slack token
-  if (req.method === 'PUT' && path === '/users/me/token') {
-    if (!userData) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    const { slackToken } = req.body;
-    
-    if (!slackToken || !slackToken.startsWith('xoxp-')) {
-      return res.status(400).json({ 
-        error: 'Valid Slack user token required' 
-      });
-    }
-
-    try {
-      // Validate new token
-      const slackClient = new SlackClient(slackToken);
-      await slackClient.testAuth();
-      
-      // Update stored token
-      await UserAuth.updateUserToken(userData.id, slackToken);
-      
-      return res.json({
-        success: true,
-        message: 'Slack token updated successfully'
-      });
-
-    } catch (error) {
-      return res.status(400).json({ 
-        error: 'Invalid Slack token',
-        message: error.message 
-      });
-    }
-  }
-
-  // Rotate API key
-  if (req.method === 'POST' && path === '/users/me/rotate-key') {
-    if (!userData) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    try {
-      const newApiKey = await UserAuth.rotateApiKey(userData.id);
-      
-      return res.json({
-        success: true,
-        message: 'API key rotated successfully',
-        newApiKey,
-        warning: 'Update your Claude configuration with the new API key'
-      });
-
-    } catch (error) {
-      return res.status(500).json({ 
-        error: 'Failed to rotate API key',
-        message: error.message 
-      });
-    }
-  }
-
-  // Deactivate account
-  if (req.method === 'DELETE' && path === '/users/me') {
-    if (!userData) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    await UserAuth.deactivateUser(userData.id);
-    
-    return res.json({
-      success: true,
-      message: 'Account deactivated successfully'
-    });
-  }
-
-  return res.status(404).json({ error: 'Endpoint not found' });
-}
-
-/**
- * Handle admin endpoints
- */
-async function handleAdminEndpoints(req, res) {
-  const adminToken = req.headers['admin-token'] || req.headers['authorization']?.replace('Bearer ', '');
-  
-  if (!adminToken || adminToken !== process.env.ADMIN_TOKEN) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-
-  const path = req.url;
-
-  // List all users
-  if (req.method === 'GET' && path === '/admin/users') {
-    const { limit = 100, cursor = '0' } = req.query;
-    const result = await UserAuth.listUsers(parseInt(limit), cursor);
-    return res.json(result);
-  }
-
-  // Get system stats
-  if (req.method === 'GET' && path === '/admin/stats') {
-    const stats = await UserAuth.getStats();
-    return res.json(stats);
-  }
-
-  // Cleanup inactive users
-  if (req.method === 'POST' && path === '/admin/cleanup') {
-    const { daysInactive = 90 } = req.body;
-    const cleanedUp = await UserAuth.cleanupInactiveUsers(daysInactive);
-    return res.json({
-      success: true,
-      message: `Cleaned up ${cleanedUp} inactive users`
-    });
-  }
-
-  return res.status(404).json({ error: 'Admin endpoint not found' });
-}
-
-/**
- * Get list of available MCP tools
- */
+// Tool definitions
 function getAvailableTools() {
   return [
     {
@@ -378,9 +228,7 @@ function getAvailableTools() {
   ];
 }
 
-/**
- * Handle MCP tool calls
- */
+// Tool call handler
 async function handleToolCall(slackClient, params, res) {
   const { name, arguments: args } = params;
 
@@ -410,7 +258,7 @@ async function handleToolCall(slackClient, params, res) {
   }
 }
 
-// Tool implementations
+// Tool implementations (keeping the existing ones)
 async function searchMessages(slackClient, args, res) {
   const { query, limit = 20 } = args;
 
