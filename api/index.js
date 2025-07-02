@@ -1,7 +1,116 @@
-// For Claude Web Integration - Update api/index.js
+// api/index.js - Simplified with direct Slack token authentication
+import { kv } from '@vercel/kv';
 
-import { SlackClient } from '../lib/slack-client.js';
-import { UserAuth } from '../lib/auth.js';
+// Simplified SlackClient
+class SlackClient {
+  constructor(token) {
+    this.token = token;
+    this.baseUrl = 'https://slack.com/api';
+  }
+
+  async makeRequest(endpoint, params = {}, method = 'GET') {
+    const url = new URL(`${this.baseUrl}/${endpoint}`);
+    const options = {
+      headers: {
+        'Authorization': `Bearer ${this.token}`,
+        'Content-Type': method === 'GET' ? 'application/json' : 'application/x-www-form-urlencoded',
+      }
+    };
+
+    if (method === 'GET') {
+      Object.keys(params).forEach(key => {
+        if (params[key] !== undefined) {
+          url.searchParams.append(key, params[key]);
+        }
+      });
+    } else {
+      options.method = method;
+      const formData = new URLSearchParams();
+      Object.keys(params).forEach(key => {
+        if (params[key] !== undefined) {
+          formData.append(key, params[key]);
+        }
+      });
+      options.body = formData.toString();
+    }
+
+    const response = await fetch(url.toString(), options);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.ok) {
+      throw new Error(`Slack API error: ${data.error}`);
+    }
+
+    return data;
+  }
+
+  async testAuth() {
+    return await this.makeRequest('auth.test');
+  }
+
+  async searchMessages(query, count = 20) {
+    return await this.makeRequest('search.messages', { query, count });
+  }
+
+  async getChannels(types = 'public_channel', limit = 100) {
+    return await this.makeRequest('conversations.list', { types, limit });
+  }
+
+  async getChannelHistory(channel, limit = 50) {
+    return await this.makeRequest('conversations.history', { channel, limit });
+  }
+
+  async sendMessage(channel, text, options = {}) {
+    return await this.makeRequest('chat.postMessage', {
+      channel,
+      text,
+      ...options
+    }, 'POST');
+  }
+
+  async getUsers(limit = 100) {
+    return await this.makeRequest('users.list', { limit });
+  }
+}
+
+// Simple UserAuth
+class UserAuth {
+  static async getUserByToken(slackToken) {
+    if (!slackToken || !slackToken.startsWith('xoxp-')) {
+      return null;
+    }
+
+    try {
+      const userId = await kv.get(`token:${slackToken}`);
+      if (!userId) {
+        return null;
+      }
+      
+      const userData = await kv.get(`user:${userId}`);
+      if (!userData || !userData.active) {
+        return null;
+      }
+      
+      // Update usage stats
+      userData.lastUsed = new Date().toISOString();
+      userData.usage.totalRequests = (userData.usage.totalRequests || 0) + 1;
+      userData.usage.lastRequest = new Date().toISOString();
+      
+      // Update in background
+      kv.set(`user:${userId}`, userData).catch(console.error);
+      
+      return userData;
+    } catch (error) {
+      console.error('Error getting user by token:', error);
+      return null;
+    }
+  }
+}
 
 export default async function handler(req, res) {
   // CORS headers for Claude web
@@ -26,31 +135,35 @@ export default async function handler(req, res) {
           tools: true
         },
         instructions: {
-          setup: "Get your API key by registering at /connect",
-          authentication: "Use your API key in the Authorization header as 'Bearer your-api-key'"
+          setup: "Get registered at /connect",
+          authentication: "Use your Slack token in the Authorization header as 'Bearer xoxp-your-token'"
         },
         endpoints: {
-          connect: "Visit /connect to register your Slack token and get an API key",
-          register: "POST /register with your Slack token to get an API key"
+          connect: "Visit /connect to register your Slack token",
+          register: "POST /register with your Slack token"
         }
       });
     }
 
-    // Registration endpoint (for /connect page)
+    // Skip auth for registration endpoint
     if (req.method === 'POST' && path === '/register') {
-      return await handleRegistration(req, res);
+      // This will be handled by the separate register.js file
+      return res.status(404).json({ error: 'Use /register endpoint' });
     }
 
     // Authentication for MCP calls
-    const userData = await authenticateRequest(req);
-    if (!userData) {
+    const slackToken = await authenticateRequest(req);
+    if (!slackToken) {
       return res.status(401).json({ 
         error: 'Authentication required',
-        message: 'Get your API key at /connect and use it as: Authorization: Bearer your-api-key'
+        message: 'Register at /connect and use your Slack token as: Authorization: Bearer xoxp-your-token'
       });
     }
 
-    const slackClient = new SlackClient(userData.slackToken);
+    // Get user data (optional - for stats/tracking)
+    const userData = await UserAuth.getUserByToken(slackToken);
+    
+    const slackClient = new SlackClient(slackToken);
 
     // Handle MCP protocol
     if (req.method === 'POST') {
@@ -64,7 +177,7 @@ export default async function handler(req, res) {
             serverInfo: {
               name: 'slack-mcp-server',
               version: '1.0.0',
-              user: userData.id
+              user: userData?.id || 'anonymous'
             }
           });
 
@@ -90,78 +203,36 @@ export default async function handler(req, res) {
   }
 }
 
-// Authentication function
+// Authentication function - now looks for Slack token directly
 async function authenticateRequest(req) {
-  // For Claude web, API key comes in Authorization header
   const authHeader = req.headers.authorization;
-  let apiKey = null;
+  let slackToken = null;
   
   if (authHeader) {
-    if (authHeader.startsWith('Bearer ')) {
-      apiKey = authHeader.substring(7);
-    } else if (authHeader.startsWith('smcp_')) {
-      apiKey = authHeader;
+    if (authHeader.startsWith('Bearer xoxp-')) {
+      slackToken = authHeader.substring(7); // Remove 'Bearer '
+    } else if (authHeader.startsWith('xoxp-')) {
+      slackToken = authHeader;
     }
   }
   
-  // Also check X-API-Key header as fallback
-  if (!apiKey) {
-    apiKey = req.headers['x-api-key'];
+  // Also check X-Slack-Token header as fallback
+  if (!slackToken) {
+    slackToken = req.headers['x-slack-token'];
   }
-  
-  if (!apiKey) return null;
-  
-  try {
-    return await UserAuth.getUserByApiKey(apiKey);
-  } catch (error) {
-    console.error('Auth error:', error);
-    return null;
-  }
-}
-
-// Registration handler
-async function handleRegistration(req, res) {
-  const { slackToken, userInfo = {} } = req.body;
   
   if (!slackToken || !slackToken.startsWith('xoxp-')) {
-    return res.status(400).json({ 
-      error: 'Valid Slack user token required',
-      format: 'Token must start with xoxp-'
-    });
+    return null;
   }
-
+  
+  // Validate token by testing it
   try {
-    // Validate token
     const slackClient = new SlackClient(slackToken);
-    const authTest = await slackClient.testAuth();
-    
-    // Create user
-    const { userId, apiKey } = await UserAuth.createUser(slackToken, {
-      ...userInfo,
-      slackUserId: authTest.user_id,
-      slackTeam: authTest.team_id,
-      slackTeamName: authTest.team,
-      slackUrl: authTest.url,
-      source: 'claude-web-integration'
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Successfully registered for Claude web integration',
-      apiKey,
-      userId,
-      integration: {
-        server_url: `https://${req.headers.host}`,
-        authorization: `Bearer ${apiKey}`,
-        instructions: "Use this API key in Claude web integration settings"
-      }
-    });
-
+    await slackClient.testAuth();
+    return slackToken;
   } catch (error) {
-    return res.status(400).json({ 
-      error: 'Registration failed',
-      message: error.message
-    });
+    console.error('Token validation error:', error);
+    return null;
   }
 }
 
@@ -258,7 +329,7 @@ async function handleToolCall(slackClient, params, res) {
   }
 }
 
-// Tool implementations (keeping the existing ones)
+// Tool implementations
 async function searchMessages(slackClient, args, res) {
   const { query, limit = 20 } = args;
 
