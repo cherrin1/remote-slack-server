@@ -145,10 +145,9 @@ export default async function handler(req, res) {
       });
     }
 
-    // Skip auth for registration endpoint
+    // Registration endpoint (for /connect page)
     if (req.method === 'POST' && path === '/register') {
-      // This will be handled by the separate register.js file
-      return res.status(404).json({ error: 'Use /register endpoint' });
+      return await handleRegistration(req, res);
     }
 
     // Authentication for MCP calls
@@ -470,13 +469,74 @@ async function getUsers(slackClient, args, res) {
       email: user.profile?.email
     }));
 
-  return res.json({
-    content: [{
-      type: 'text',
-      text: `Found ${users.length} users:\n\n` + 
-            users.slice(0, 20).map(user => 
-              `**${user.real_name || user.name}** (@${user.name})${user.email ? ` - ${user.email}` : ''}`
-            ).join('\n')
-    }]
-  });
+// Registration handler
+async function handleRegistration(req, res) {
+  const { slackToken, userInfo = {} } = req.body;
+  
+  if (!slackToken || !slackToken.startsWith('xoxp-')) {
+    return res.status(400).json({ 
+      error: 'Valid Slack user token required',
+      format: 'Token must start with xoxp-'
+    });
+  }
+
+  try {
+    console.log('Registering user with token:', slackToken.substring(0, 20) + '...');
+    
+    // Validate token
+    const slackClient = new SlackClient(slackToken);
+    const authTest = await slackClient.testAuth();
+    
+    console.log('Auth test successful:', authTest);
+    
+    // Generate user ID
+    const userId = 'usr_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+    
+    const userData = {
+      id: userId,
+      slackToken,
+      createdAt: new Date().toISOString(),
+      lastUsed: new Date().toISOString(),
+      userInfo: {
+        ...userInfo,
+        slackUserId: authTest.user_id,
+        slackTeam: authTest.team_id,
+        slackTeamName: authTest.team,
+        slackUrl: authTest.url,
+        source: 'claude-web-integration'
+      },
+      active: true,
+      usage: {
+        totalRequests: 0,
+        lastRequest: null
+      }
+    };
+
+    // Store user data
+    await kv.set(`user:${userId}`, userData);
+    
+    // Create token mapping for fast lookups
+    await kv.set(`token:${slackToken}`, userId);
+
+    console.log('User created:', userId);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Successfully registered for Claude web integration',
+      token: slackToken,
+      userId,
+      integration: {
+        server_url: `https://${req.headers.host}`,
+        authorization: `Bearer ${slackToken}`,
+        instructions: "Use your Slack token directly for authentication"
+      }
+    });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    return res.status(400).json({ 
+      error: 'Registration failed',
+      message: error.message
+    });
+  }
 }
