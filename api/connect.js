@@ -6,7 +6,9 @@ export default async function handler(req, res) {
   }
 
   const baseUrl = `https://${req.headers.host}`;
-  const { oauth, auth_code, redirect_uri, state, client_id } = req.query;
+  const { oauth, client, auth_code, redirect_uri, state, client_id } = req.query;
+
+  const isClaudeWeb = client === 'claude-web' || oauth === 'true';
 
   const html = `
 <!DOCTYPE html>
@@ -62,21 +64,21 @@ export default async function handler(req, res) {
             margin-bottom: 30px;
         }
 
-        .oauth-notice {
-            background: #e6fffa;
-            border: 2px solid #38b2ac;
+        .claude-notice {
+            background: #e6f3ff;
+            border: 2px solid #4299e1;
             border-radius: 8px;
             padding: 16px;
             margin-bottom: 20px;
             text-align: center;
         }
 
-        .oauth-notice h3 {
-            color: #234e52;
+        .claude-notice h3 {
+            color: #2b6cb0;
             margin-bottom: 8px;
         }
 
-        .oauth-notice p {
+        .claude-notice p {
             color: #2d3748;
             font-size: 14px;
         }
@@ -111,39 +113,6 @@ export default async function handler(req, res) {
             font-size: 14px;
             color: #718096;
             margin-top: 4px;
-        }
-        
-        .token-help {
-            background: #f7fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            padding: 16px;
-            margin: 16px 0;
-        }
-        
-        .token-help h3 {
-            color: #2d3748;
-            margin-bottom: 8px;
-            font-size: 16px;
-        }
-        
-        .token-help ol {
-            margin-left: 20px;
-            color: #4a5568;
-        }
-        
-        .token-help li {
-            margin-bottom: 4px;
-        }
-        
-        .token-help a {
-            color: #667eea;
-            text-decoration: none;
-            font-weight: 600;
-        }
-        
-        .token-help a:hover {
-            text-decoration: underline;
         }
         
         .workplace-note {
@@ -212,7 +181,7 @@ export default async function handler(req, res) {
             color: #2a4365;
         }
         
-        .oauth-success {
+        .claude-success {
             background: #f0fff4;
             border: 2px solid #68d391;
             border-radius: 8px;
@@ -222,14 +191,9 @@ export default async function handler(req, res) {
             display: none;
         }
         
-        .oauth-success h3 {
+        .claude-success h3 {
             color: #22543d;
             margin-bottom: 12px;
-        }
-        
-        .oauth-success p {
-            color: #2d3748;
-            margin-bottom: 16px;
         }
         
         .complete-btn {
@@ -253,13 +217,13 @@ export default async function handler(req, res) {
         <div class="header">
             <div class="logo">🚀</div>
             <h1>Connect Slack to Claude</h1>
-            <p class="subtitle">Connect your Slack workspace to Claude's MCP server</p>
+            <p class="subtitle">Complete your Claude Web integration</p>
         </div>
         
-        ${oauth ? `
-        <div class="oauth-notice">
-            <h3>🔗 Claude OAuth Connection</h3>
-            <p>Complete your Slack connection for Claude by entering your token below.</p>
+        ${isClaudeWeb ? `
+        <div class="claude-notice">
+            <h3>🤖 Claude Web OAuth Setup</h3>
+            <p>Enter your Slack token below to complete the integration with Claude Web.</p>
         </div>
         ` : ''}
         
@@ -278,23 +242,6 @@ export default async function handler(req, res) {
                     required
                 >
                 <div class="help-text">Your token should start with "xoxp-"</div>
-            </div>
-            
-            <div class="token-help">
-                <h3>🔑 Need a Slack Token?</h3>
-                <ol>
-                    <li>Go to <a href="https://api.slack.com/apps" target="_blank">Slack API Apps</a></li>
-                    <li>Create a new app or use existing</li>
-                    <li>Add these User Token Scopes:
-                        <ul style="margin: 8px 0 8px 20px; font-size: 13px;">
-                            <li>channels:history, channels:read, chat:write</li>
-                            <li>search:read, users:read, groups:read</li>
-                            <li>im:history, mpim:history</li>
-                        </ul>
-                    </li>
-                    <li>Install app to workspace</li>
-                    <li>Copy the User OAuth Token</li>
-                </ol>
             </div>
             
             <div class="form-group">
@@ -318,52 +265,51 @@ export default async function handler(req, res) {
             </div>
             
             <button type="submit" class="connect-btn" id="connectBtn">
-                🔗 ${oauth ? 'Complete Claude Connection' : 'Connect to Claude'}
+                🔗 ${isClaudeWeb ? 'Complete Claude Web Integration' : 'Connect to Claude'}
             </button>
         </form>
         
         <div class="status" id="status"></div>
         
-        <div class="oauth-success" id="oauthSuccess">
-            <h3>✅ Connection Complete!</h3>
-            <p>Your Slack workspace has been successfully connected to Claude.</p>
-            <button class="complete-btn" onclick="completeOAuth()">
+        <div class="claude-success" id="claudeSuccess">
+            <h3>✅ Integration Complete!</h3>
+            <p>Your Slack workspace has been successfully connected to Claude Web.</p>
+            <button class="complete-btn" onclick="completeClaudeOAuth()">
                 🚀 Return to Claude
             </button>
         </div>
     </div>
 
     <script>
-        // OAuth parameters from URL
-        const isOAuth = ${oauth ? 'true' : 'false'};
+        // OAuth parameters
+        const isClaudeWeb = ${isClaudeWeb};
         const authCode = '${auth_code || ''}';
         const redirectUri = '${redirect_uri || ''}';
         const state = '${state || ''}';
+        const clientId = '${client_id || ''}';
         
         document.getElementById('connectionForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const submitBtn = document.getElementById('connectBtn');
             const status = document.getElementById('status');
-            const oauthSuccess = document.getElementById('oauthSuccess');
+            const claudeSuccess = document.getElementById('claudeSuccess');
             
-            // Get form data
             const slackToken = document.getElementById('slackToken').value.trim();
             const userName = document.getElementById('userName').value.trim();
             const userEmail = document.getElementById('userEmail').value.trim();
             
-            // Validate token format
             if (!slackToken.startsWith('xoxp-') || slackToken.length < 50) {
                 showStatus('error', '❌ Invalid token format. Token should start with "xoxp-" and be longer.');
                 return;
             }
             
-            // Show loading state
             submitBtn.disabled = true;
             submitBtn.textContent = '🔄 Connecting...';
-            showStatus('loading', '🔄 Connecting to Slack and registering your token...');
+            showStatus('loading', '🔄 Connecting to Slack...');
             
             try {
+                // Register the user
                 const response = await fetch('${baseUrl}/register', {
                     method: 'POST',
                     headers: {
@@ -372,9 +318,9 @@ export default async function handler(req, res) {
                     body: JSON.stringify({
                         slackToken: slackToken,
                         userInfo: {
-                            name: userName || 'Anonymous User',
+                            name: userName || 'Claude Web User',
                             email: userEmail || '',
-                            source: isOAuth ? 'oauth-web-interface' : 'web-interface',
+                            source: 'claude-web-oauth',
                             timestamp: new Date().toISOString()
                         }
                     })
@@ -383,8 +329,8 @@ export default async function handler(req, res) {
                 const data = await response.json();
                 
                 if (response.ok && data.success) {
-                    if (isOAuth && authCode) {
-                        // Store the API key for OAuth flow
+                    if (isClaudeWeb && authCode) {
+                        // Store API key for Claude Web OAuth flow
                         await fetch('${baseUrl}/oauth/store-token', {
                             method: 'POST',
                             headers: {
@@ -396,27 +342,22 @@ export default async function handler(req, res) {
                             })
                         });
                         
-                        // Show OAuth success
                         showStatus('success', '✅ Successfully connected to Slack!');
-                        oauthSuccess.style.display = 'block';
+                        claudeSuccess.style.display = 'block';
                         document.getElementById('connectionForm').style.display = 'none';
                     } else {
-                        // Regular success - show API key
                         showStatus('success', '✅ Successfully connected! API Key: ' + data.apiKey);
                     }
-                    
                 } else {
-                    // Error from server
                     showStatus('error', '❌ ' + (data.message || data.error || 'Connection failed'));
                 }
                 
             } catch (error) {
                 console.error('Connection error:', error);
-                showStatus('error', '❌ Network error. Please check your connection and try again.');
+                showStatus('error', '❌ Network error. Please try again.');
             } finally {
-                // Reset button
                 submitBtn.disabled = false;
-                submitBtn.textContent = isOAuth ? '🔗 Complete Claude Connection' : '🔗 Connect to Claude';
+                submitBtn.textContent = isClaudeWeb ? '🔗 Complete Claude Web Integration' : '🔗 Connect to Claude';
             }
         });
         
@@ -427,18 +368,19 @@ export default async function handler(req, res) {
             status.style.display = 'block';
         }
         
-        function completeOAuth() {
-            if (redirectUri) {
+        function completeClaudeOAuth() {
+            if (redirectUri && authCode) {
                 const returnUrl = redirectUri + 
                     \`?code=\${authCode}\` + 
                     (state ? \`&state=\${state}\` : '');
+                console.log('Redirecting Claude Web to:', returnUrl);
                 window.location.href = returnUrl;
             } else {
+                // Fallback - just close the window
                 window.close();
             }
         }
         
-        // Auto-focus token input
         document.getElementById('slackToken').focus();
     </script>
 </body>
