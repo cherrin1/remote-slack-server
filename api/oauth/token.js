@@ -1,4 +1,4 @@
-// api/oauth/token.js - OAuth token exchange for Claude Web
+// api/oauth/token.js - Updated for direct Slack tokens
 
 import { kv } from '@vercel/kv';
 
@@ -64,10 +64,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Look up the stored API key for this authorization code
-    const apiKey = await kv.get(`oauth_code:${code}`);
+    // Look up the stored Slack token for this authorization code
+    const slackToken = await kv.get(`oauth_code:${code}`);
     
-    if (!apiKey) {
+    if (!slackToken) {
       console.log('Authorization code not found or expired:', code);
       return res.status(400).json({
         error: 'invalid_grant',
@@ -80,7 +80,7 @@ export default async function handler(req, res) {
 
     // Create access token response for Claude Web
     const tokenResponse = {
-      access_token: apiKey,
+      access_token: slackToken, // Return the Slack token directly
       token_type: 'bearer',
       expires_in: 31536000, // 1 year
       refresh_token: `refresh_${Date.now()}_${Math.random().toString(36)}`,
@@ -88,7 +88,7 @@ export default async function handler(req, res) {
     };
 
     console.log('Returning token to Claude Web:', { 
-      access_token: apiKey.substring(0, 20) + '...', 
+      access_token: slackToken.substring(0, 20) + '...', 
       token_type: tokenResponse.token_type 
     });
 
